@@ -1,86 +1,120 @@
-// Deonveo3 Bot - Fixed Version (no duplicate listeners)
+import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch";
+import axios from "axios";
+import dotenv from "dotenv";
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const veoKey = process.env.VEO_API_KEY;
+dotenv.config();
 
-const bot = new TelegramBot(token, { polling: true });
+const app = express();
+const PORT = process.env.PORT || 8080;
 
-// State memory
-const userState = {};
+// Ambil token bot dan API key dari .env
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const VEO_API_URL =
+  process.env.VEO_API_URL ||
+  "https://generativelanguage.googleapis.com/v1beta/openai/generations";
+const VEO_API_KEY = process.env.VEO_API_KEY;
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  userState[chatId] = null; // reset state
-  bot.sendMessage(chatId, "Pilih aspek rasio:", {
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error("❌ Missing TELEGRAM_BOT_TOKEN in .env");
+  process.exit(1);
+}
+
+// Inisialisasi bot Telegram
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+
+// Tombol aspek rasio
+function sendAspectButtons(chatId) {
+  const opts = {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "📱 9:16 (Vertikal)", callback_data: "9_16" },
-          { text: "🖥️ 16:9 (Horizontal)", callback_data: "16_9" }
-        ]
-      ]
-    }
-  });
+          { text: "📱 9:16 (Vertical)", callback_data: "aspect_9_16" },
+          { text: "🖥️ 16:9 (Horizontal)", callback_data: "aspect_16_9" },
+        ],
+      ],
+    },
+  };
+  bot.sendMessage(chatId, "Pilih aspek rasio video Veo3:", opts);
+}
+
+// Command /start
+bot.onText(/\/start/, (msg) => {
+  bot.sendMessage(
+    msg.chat.id,
+    "👋 Selamat datang di *Veodeonfixbot*!\n\nPilih aspek rasio video yang ingin kamu buat:",
+    { parse_mode: "Markdown" }
+  );
+  sendAspectButtons(msg.chat.id);
 });
 
+const userState = {};
+
+// Callback tombol aspek
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
-  const ratio = query.data;
+  const data = query.data;
 
-  // Save selected ratio
-  userState[chatId] = { ratio, waitingPrompt: true };
+  const aspect = data === "aspect_16_9" ? "16:9" : "9:16";
+  userState[chatId] = { aspect, waitingPrompt: true };
 
-  await bot.sendMessage(chatId, `Aspek rasio: ${ratio.replace("_", ":")}\nSekarang kirim deskripsi video yang ingin dibuat.`);
+  bot.sendMessage(
+    chatId,
+    `✅ Aspek rasio dipilih: *${aspect}*\nSekarang kirim deskripsi video kamu.`,
+    { parse_mode: "Markdown" }
+  );
 });
 
+// Saat user kirim prompt
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const state = userState[chatId];
 
+  // Abaikan jika belum pilih aspek atau ini command
   if (!state || msg.text.startsWith("/")) return;
 
   if (state.waitingPrompt) {
     const prompt = msg.text;
-    const ratio = state.ratio;
-    userState[chatId].waitingPrompt = false;
+    state.waitingPrompt = false;
 
-    await bot.sendMessage(chatId, "🎬 Membuat video, tunggu sebentar...");
+    bot.sendMessage(chatId, "🎬 Membuat video 8 detik multi-scene...");
 
-    const scenes = [
-      { scene: 1, text: `${prompt} - Scene 1` },
-      { scene: 2, text: `${prompt} - Scene 2` }
-    ];
+    // Payload contoh untuk Veo API
+    const body = {
+      model: "gemini-1.5-flash",
+      prompt: {
+        text: `Buat video AI berdurasi 8 detik dengan aspek rasio ${state.aspect}, tema: ${prompt}. Format multi-scene.`,
+      },
+    };
 
     try {
-      const res = await fetch("https://api.veo-ai.com/v3.1/generate", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${veoKey}`
-        },
-        body: JSON.stringify({
-          prompt,
-          aspect_ratio: ratio === "9_16" ? "9:16" : "16:9",
-          duration: 8,
-          multi_scene: scenes
-        })
+      const response = await axios.post(`${VEO_API_URL}?key=${VEO_API_KEY}`, body, {
+        headers: { "Content-Type": "application/json" },
+        timeout: 120000,
       });
 
-      const data = await res.json();
-      const videoURL = data.video_url || "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4";
+      // Ambil URL video dari respons API
+      const videoUrl = response.data?.video_url || response.data?.result?.url;
 
-      await bot.sendVideo(chatId, videoURL, {
-        caption: `✅ Video selesai dibuat (${ratio.replace("_", ":")}, 8 detik)`
-      });
-
-      userState[chatId] = null;
-      bot.sendMessage(chatId, "Ketik /start untuk membuat video baru 🎥");
+      if (videoUrl) {
+        bot.sendVideo(chatId, videoUrl, { caption: "✅ Video selesai dibuat!" });
+      } else {
+        bot.sendMessage(
+          chatId,
+          "⚠️ API berhasil dipanggil tapi tidak ada URL video di respons.\nCoba periksa format API Veo."
+        );
+        console.log("Response API:", JSON.stringify(response.data, null, 2));
+      }
     } catch (err) {
-      console.error(err);
-      bot.sendMessage(chatId, "❌ Terjadi kesalahan saat membuat video.");
-      userState[chatId] = null;
+      console.error("Error API:", err.response?.data || err.message);
+      bot.sendMessage(
+        chatId,
+        "❌ Gagal membuat video. Periksa API key, format, atau log Railway."
+      );
     }
   }
 });
+
+// Endpoint untuk Railway (health check)
+app.get("/", (req, res) => res.send("🤖 Veodeonfixbot is running on Railway."));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
